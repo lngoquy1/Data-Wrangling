@@ -1,0 +1,330 @@
+---
+title: "GEOfiles_analysis"
+author: "Lan Ngo"
+date: "June 6, 2017"
+output:
+  html_document:
+    toc: true 
+    depth: 3 
+    theme: paper 
+    highlight: tango
+---
+
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width = 400)
+``` 
+This program will take user's query to extract information from the GEO files 
+
+1. Load necessary packages..
+
+```{r eval=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+#Part 1 Prepare Environment and Data
+#setwd("C:/Drop/Dropbox/sepsis/Lan/Microarray Analysis")
+#install the core bioconductor packages, if not already installed
+source("http://bioconductor.org/biocLite.R")
+biocLite("GEOquery")
+biocLite("affy")
+biocLite("affyPLM")
+#Install QC array Quality Metrics
+biocLite("arrayQualityMetrics")
+biocLite("stringr")
+biocLite("illuminaio")
+biocLite("preprocessCore")
+
+library(arrayQualityMetrics)
+library(statmod)
+library(GEOquery)
+library(affy)
+library(gcrma)
+library(affyPLM)
+#library(stringr)
+library(preprocessCore)
+library(ggplot2)
+library(oligo)
+library(limma)
+library(viridis)
+```
+
+2. Getting the user's input for name of the GEO files 
+ 
+``` {r eval=FALSE}
+
+file_name <- readline(prompt="Enter GEO file name: ")
+location <- readline(prompt="Enter storing location for the file: ")
+setwd(location)
+# load series and platform data from GEO
+output <- capture.output(getGEO(file_name, GSEMatrix =TRUE))
+gset <- getGEO(file_name, GSEMatrix =TRUE)
+# Extract name of the platform from system output 
+extracted <- output[grep("GPL", output)]
+gpl_name <- substr(extracted, nchar("Annotation: ")+1, nchar(extracted))
+if (length(gset) > 1) idx <- grep(gpl_name, attr(gset, "names")) else idx <- 1
+# Making gset an ExpressionSet
+gset <- gset[[idx]]
+gset
+# Count the number of rows
+n=(1+length(varLabels(gset)))
+```
+
+3. Getting clinical variables 
+```{r eval=FALSE}
+# Showing summary of the dataset
+summary(pData(gset))
+output <- capture.output(colnames(summary(pData(gset))))
+var_list <- strsplit(readline(prompt="Which clinical variables do you want to add? "), " ")[[1]]
+name <- strsplit(readline(prompt="How do you name these variable respectively? "), " ")[[1]]
+# Collecting clinical variables 
+
+for (i in 1:length(var_list)){
+  data <- pData(gset)[[var_list[i]]]
+  pData(gset)[[name[i]]] = data
+}
+
+# Total number of labels after adding groups
+nn=length(varLabels(gset))
+```
+
+4. Conduct primary analysis of the entire dataset
+```{r eval=FALSE}
+#Select the groups to examine
+raw.data <- ExpressionSet(assayData=exprs(gset), phenoData=phenoData(gset)[ ,c(n:nn)])
+
+#Boxplot Prior RMA
+png(filename=paste(file_name, "_intensitiesBoxPlots.png", sep = ""),width=960, height=960)
+boxplot(exprs(raw.data), col="red",main="Raw Probe Intensities")
+dev.off()
+
+# #This works, but would need to set neg values to NaN as below
+# normalized.eset <- normalize.quantiles(log2(exprs(raw.data)), copy=TRUE)
+# normalized.eset[which(normalized.eset<=0)] = NaN
+# summary(normalized.eset)
+# png(filename=paste(file_name, "_RMAintensitiesBoxPlots.png", sep=""),width=960, height=960)
+# boxplot(normalized.eset , col="blue",main="Raw Probe Intensities")
+# dev.off()
+
+# use affyPLM's nornmalize Expression set 
+norm.data <- normalize.ExpressionSet.quantiles(raw.data, transfn = c("none", "log", "antilog"))
+png(filename=paste(file_name, "_RMAintensitiesBoxPlots.png", sep=""),width=960, height=960)
+boxplot(exprs(norm.data) , col="blue",main="Raw Probe Intensities")
+dev.off()
+
+
+#Get arrayQualityMetrics report:
+groups <- readline(prompt = "Choose intgroups for QC report: ")
+library(arrayQualityMetrics)
+### ERROR: Invalid filename argument
+arrayQualityMetrics(raw.data,
+                    outdir = paste("arrayQualityMetricsReport", file_name, sep=""),
+                    force = FALSE,
+                    intgroup=groups,
+                    do.logtransform = FALSE,
+                    spatial = TRUE,
+                    reporttitle = paste("arrayQualityMetrics report for", deparse(substitute(expressionset))))
+
+sessionInfo()
+
+```
+
+5. Differential Gene Expression analysis 
+
+``` {r eval=FALSE}
+# Construct a design matrix then do linear fit
+
+#Valid name required: make better variable name
+clabel <- readline(prompt="What classification label are we looking at? ")
+fixlabel <- function(clabel){
+  pos <- lapply(norm.data[[clabel]], function(x){unlist(gregexpr(":", x))})
+  norm.data[[clabel]] <- lapply(1:length(norm.data[[clabel]]), FUN =function(x){norm.data[[clabel]][x] <- substr(norm.data[[clabel]][x], as.numeric(pos[x])+2, nchar(as.character(norm.data[[clabel]][x])))})
+# Remove rows of invalid name 
+  norm.data[[clabel]] <- as.character(norm.data[[clabel]])
+}
+lapply(name, fixlabel)
+# pos <- lapply(norm.data[[clabel]], function(x){unlist(gregexpr(":", x))})
+# norm.data[[clabel]] <- lapply(1:length(norm.data[[clabel]]), FUN =function(x){norm.data[[clabel]][x] <- substr(norm.data[[clabel]][x], as.numeric(pos[x])+2, nchar(as.character(norm.data[[clabel]][x])))})
+# #lapply(norm.data[[clabel]], function(x){x <- str_replace_all(x, space(), "")})
+# # Remove rows of invalid name 
+# norm.data[[clabel]] <- as.character(norm.data[[clabel]])
+# names(table(norm.data[[clabel]]))
+choices <- unlist(strsplit(readline(prompt = "Choose 2 label types for the contrast matrix: "), " "))
+# Omit invalid rows
+rows_to_keep=which(norm.data[[clabel]] %in% choices)
+norm.data <- norm.data[, rows_to_keep]
+design <- model.matrix(~ -1+factor(norm.data[[clabel]]))
+colnames(design) <- levels(factor(norm.data[[clabel]]))
+fit <- lmFit(norm.data, design)
+#Construct contrast matrix 
+contrast <- eval(parse(text=paste("makeContrasts(", clabel, "=", choices[1], "-", choices[2],", levels = design)")))
+fit2 <- contrasts.fit(fit, contrast)
+fit2 <- eBayes(fit2)
+#Collecting the fit results
+results <- topTable(fit2, coef = clabel, adjust="BH", p.value=0.05, number=100)
+#Getting gene names from gene codes
+results$ID <- row.names(results)
+#Show the results so that we can choose correct environment
+head(results, 5)
+env_info <- readline("Choose environment for converting ID to gene name: ")
+env_name <- paste(substr(env_info, 1, nchar(env_info)-nchar(".db")), "SYMBOL", sep="")
+biocLite(env_info)
+library(env_info, character.only = TRUE)
+results$SYMBOL <- eval(parse(text=paste("lapply(results$ID, function(x) mget(x, envir =", env_name, ",ifnotfound=NA)[[1]])")))
+
+top_gene <- row.names(results)[1]
+```
+
+6. Visualizing the most important genes
+```{r eval=FALSE}
+#boxplot of top differentially expressed gene's normalized intensities
+png(filename = paste(file_name, "_boxplot_DE.png", sep=""), width = 960, height = 960)
+boxplot(exprs(norm.data)[top_gene, ] ~ norm.data[[clabel]], col="lightgreen")
+dev.off()
+
+#Create a heatmap using the top differentially expressed genes using samples from all conditions
+top.eset <- norm.data[row.names(norm.data) %in% row.names(results)]
+two.col <- c("lightgrey", "darkorchid4")
+saveRDS(top.eset, file=paste(file_name, "_top_eset.rds", sep=""))
+status.colors <- sapply(as.numeric(factor(norm.data[[clabel]])), function(x){two.col[x]})
+png(filename=paste(file_name, "_heatmap_DE.png", sep=""), width=960, height=960)
+heatmap(exprs(top.eset), col=viridis(256, option='B'), labRow=top.eset[[clabel]], ColSideColors = status.colors)
+dev.off()
+```
+
+Combining normalized esets to run feature selection using Random Forest
+
+``` {r eval=FALSE}
+library(randomForest) 
+library(pROC)
+names(exprs(norm.data)) <- lapply(names(exprs(norm.data)), function(x){x <- substr(x, 2, nchar(x))})
+predictors <- pData(norm.data)
+expr.data <- data.frame(exprs(norm.data))
+gene.filter.cutoff <- 10^-4
+top.genes <- results[results$adj.P.Val < gene.filter.cutoff, ]
+
+top.genes.subset <- expr.data[ row.names(expr.data) %in% top.genes$ID,]
+
+full.data <- merge(predictors, top.genes.subset)
+# or without gene selection:
+#full.data <- merge(predictors, expr.data)
+
+set.seed(222) # Set random seed
+n <- length(names(full.data))
+#Showing top 10 column names 
+head(colnames(full.data), 10)
+k <- as.numeric(readline("Enter number of columns to exclude: "))
+#data: optional data frame containing the variables in the model 
+rf <- randomForest(factor(full.data[,clabel])~., data=full.data[, (k+1):n], ntree=100, importance=TRUE)
+rf
+important_genes <- rf$importance
+write.csv(rf$importance, file=paste0("full_gini_", file_name, "_", toString(gene.filter.cutoff), ".csv"), quote=FALSE)
+rf.pred <- predict(rf, full.data[,(k+1):n], type="prob")
+head(rf.pred)
+
+```
+
+
+Conduct 5-fold validation and plot ROC-curve to see the classifier's performance.
+``` {r eval=FALSE}
+# Cross-Validation
+N = nrow(full.data)
+K = 5
+set.seed(1234)
+s = sample(1:K, size=N, replace=T)
+pred_outputs.rf <- vector(mode="numeric", length=N)
+obs_outputs <- vector(mode="numeric", length=N)
+offset <- 0
+for(i in 1:K){
+	train <- full.data[s != i, ]
+	test <- full.data[s == i, ]
+  obs_outputs[1:length(s[s==i]) + offset] <- test[[clabel]]
+  #RF train/test
+  rf <- randomForest(factor(train[,clabel])~., data=train[, (k+1):n], ntree=100)
+	rf.pred.curr <- predict(rf, newdata=test[, (k+1):n], type="prob") 
+	pred_outputs.rf[1:length(s[s==i])] <- rf.pred.curr[,2]
+	offset <- offset + length(s[s==i])
+}
+
+#Saving the ROC plot (mediocre!)
+pdf(paste0("rf_roc_plot_", file_name, toString(gene.filter.cutoff), ".pdf"))
+roc(obs_outputs, pred_outputs.rf, ci=TRUE)
+plot.roc(full.data[,clabel], rf.pred[, 2], col="darkgreen")
+plot.roc(obs_outputs, pred_outputs.rf, ci=TRUE, col="red", add=TRUE)
+legend("bottomright", legend=c("Training", "Cross-Validation"), col=c("darkgreen", "red"), lwd=1)
+dev.off()
+
+# Saving objects
+require(mgcv)
+saveRDS(gset, file = paste0(file_name,"_gset.rds"))
+saveRDS(norm.data, file =paste(file_name, "_norm_data.rds", sep=""))
+
+# Saving results of top DE genes
+results <- apply(results, 2, as.character)
+write.csv(results, file=paste("top_DE_", file_name, ".csv", sep = ""), quote=FALSE)
+results
+```
+Use LASSO to conduct feature selection 
+
+``` {r eval=FALSE}
+library(glmnet)
+# Data = considering that we have a data frame named dataF, with its first column being the class
+x <- as.matrix(full.data[,(k+1):n]) # Removes class
+y <- as.character(as.matrix(full.data[[clabel]])) # Only class
+
+set.seed(999)
+cv.lasso <- cv.glmnet(x, y, family='binomial', alpha=1, parallel=TRUE, standardize=TRUE, type.measure='auc')
+
+# Results
+plot(cv.lasso)
+plot(cv.lasso$glmnet.fit, xvar="lambda", label=TRUE)
+cv.lasso$lambda.min
+cv.lasso$lambda.1se
+top_coef <- as.data.frame(as.matrix(coef(cv.lasso, s=cv.lasso$lambda.min)))
+names(top_coef) <- c("ID", "score")
+top_coef$SYMBOL <- eval(parse(text=paste("lapply(rownames(top_coef), function(x) mget(substr(x, 2, nchar(x)), envir =", env_name, ", ifnotfound=NA)[[1]])")))
+top_coef <- apply(top_coef, 2, as.character)
+#Table of gene names and co-efficients 
+write.csv(top_coef, file=paste("full_coef_", file_name, ".csv", sep = ""), quote=FALSE)
+
+```
+
+
+Combining different gsets and conduct a meta-analysis 
+``` {r eval=FALSE}
+set_names <- strsplit
+norm.set_1 <- readRDS("GSE60244_norm_data.rds")
+norm.set_2 <- readRDS("GSE63990_norm_data.rds")
+# Create a data frame training data from the expression set
+
+```
+
+
+Use h2o 
+```{r eval=FALSE}
+library(h2o)
+h2o.init(nthreads = -1)
+h2o.no_progress()  # Disable progress bars for Rmd
+train.data <- h2o.importFile(cbind(pData(norm.data), t(exprs(norm.data))))
+y <- clabel
+x <- setdiff(names(train.data), y)
+train.data[,y] <- as.factor(train.data[,y])
+splits <- h2o.splitFrame(train.data, ratios = 0.8, seed = 1)
+activation_opt <- c("Rectifier", "Maxout", "Tanh")
+l1_opt <- c(0, .00001, .0001, .001, .01)
+l2_opt <- c(0, .00001, .0001, .001, .01)
+hyper_params <- list(activation = activation_opt, l1=l1_opt, l2=l2_opt)
+search_criteria <- list(strategy = "RandomDiscrete", max_runtime_secs=600)
+dl_grid <- h2o.grid("deeplearning", x = x, y = y,
+                    grid_id = "dl_grid2", 
+                    training_frame = splits[[1]],
+                    validation_frame = splits[[2]],
+                    seed = 1, 
+                    hyper_params = hyper_params,
+                    search_criteria = search_criteria)
+
+```
+
+
+Use denoising autoencoders (ADAGE)
+```{r eval=FALSE}
+
+```
+
+Use Learning classifier system (LCS)
